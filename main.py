@@ -10,18 +10,19 @@ from evaluate import evaluate_model, plot_evaluation_results
 from utils import convert_common_voice_to_wav
 import torch
 import shutil
+import csv
 
 # ======== УЛУЧШЕННАЯ КОНФИГУРАЦИЯ ========
 TSV_PATH = r"C:\Users\Лиза\Desktop\Диплом\voice-auth\en\train.tsv"
 AUDIO_DIR = r"C:\Users\Лиза\Desktop\Диплом\voice-auth\en\clips"
 PROCESSED_DIR = "full_data"
-MIN_FILES_PER_USER = 8  # Увеличили минимальное количество файлов
+MIN_FILES_PER_USER = 8
 TEST_SIZE = 0.2
 VAL_SIZE = 0.25
-BATCH_SIZE = 64      # Уменьшили batch size для лучшего обучения
-EPOCHS = 100         # Увеличили количество эпох
-N_MFCC = 40          # Больше MFCC коэффициентов
-MAX_LEN = 256        # Увеличили длину последовательности
+BATCH_SIZE = 64
+EPOCHS = 100
+N_MFCC = 40
+MAX_LEN = 256
 
 # Установка seed для воспроизводимости
 torch.manual_seed(42)
@@ -35,10 +36,8 @@ print("\n" + "="*80)
 print("IMPROVED VOICE AUTHENTICATION SYSTEM - FULL DATASET PROCESSING")
 print("="*80 + "\n")
 
-# Очистка предыдущих данных (опционально)
 if os.path.exists(PROCESSED_DIR):
     print(f"⚠️ Warning: Output directory {PROCESSED_DIR} already exists")
-    # shutil.rmtree(PROCESSED_DIR)  # Раскомментировать для очистки
 
 # ======== КОНВЕРТАЦИЯ ========
 print("\n===== AUDIO CONVERSION =====")
@@ -54,25 +53,28 @@ if converted_files == 0:
 
 # ======== ПОДГОТОВКА ДАННЫХ ========
 print("\n===== DATA PREPARATION =====")
-files = glob.glob(os.path.join(PROCESSED_DIR, "user_*.wav"))
+files = glob.glob(os.path.join(PROCESSED_DIR, "*.wav"))
 print(f"Found {len(files)} WAV files in {PROCESSED_DIR}")
 
 if len(files) == 0:
     print("❌ No files found! Exiting.")
     exit(1)
 
-# Группировка по пользователям
+# Группировка по пользователям (Common Voice формат)
 user_files = defaultdict(list)
-for f in files:
-    filename = os.path.basename(f)
-    parts = filename.split('_')
-    if len(parts) >= 3:
-        user_id = parts[1]
-        user_files[user_id].append(f)
+
+with open(TSV_PATH, encoding='utf-8') as tsvfile:
+    reader = csv.DictReader(tsvfile, delimiter='\t')
+    for row in reader:
+        filename = os.path.splitext(os.path.basename(row['path']))[0] + ".wav"
+        full_path = os.path.join(PROCESSED_DIR, filename)
+        if os.path.exists(full_path):
+            user_id = row['client_id']
+            user_files[user_id].append(full_path)
 
 print(f"Total users: {len(user_files)}")
 
-# Фильтрация пользователей с достаточным количеством файлов
+# Фильтрация пользователей
 valid_users = [user for user in user_files if len(user_files[user]) >= MIN_FILES_PER_USER]
 print(f"Users with ≥{MIN_FILES_PER_USER} recordings: {len(valid_users)}")
 
@@ -80,13 +82,11 @@ if len(valid_users) == 0:
     print("❌ No valid users found! Exiting.")
     exit(1)
 
-# Ограничиваем количество пользователей для управляемого эксперимента
-MAX_USERS = 100  # Ограничиваем для начального тестирования
+MAX_USERS = 100
 if len(valid_users) > MAX_USERS:
     valid_users = valid_users[:MAX_USERS]
     print(f"Limited to {MAX_USERS} users for this experiment")
 
-# Создание dataset
 file_list = []
 labels = []
 label2id = {user: idx for idx, user in enumerate(valid_users)}
@@ -101,7 +101,7 @@ print(f"Total files selected: {len(file_list)}")
 print(f"Unique users: {len(valid_users)}")
 print(f"Average files per user: {len(file_list) / len(valid_users):.1f}")
 
-# Разделение данных с стратификацией
+# ======== РАЗДЕЛЕНИЕ ========
 print("\n===== DATA SPLITTING =====")
 train_files, test_files, train_labels, test_labels = train_test_split(
     file_list, labels,
@@ -118,44 +118,23 @@ train_files, val_files, train_labels, val_labels = train_test_split(
 )
 
 print(f"Train set: {len(train_files)} files")
-print(f"Validation set: {len(val_files)} files") 
+print(f"Validation set: {len(val_files)} files")
 print(f"Test set: {len(test_files)} files")
 
-# Проверка баланса классов
 from collections import Counter
 train_class_counts = Counter(train_labels)
-print(f"Train class balance - Min: {min(train_class_counts.values())}, "
-      f"Max: {max(train_class_counts.values())}, "
-      f"Mean: {np.mean(list(train_class_counts.values())):.1f}")
+print(f"Train class balance - Min: {min(train_class_counts.values())}, Max: {max(train_class_counts.values())}, Mean: {np.mean(list(train_class_counts.values())):.1f}")
 
-# Создание улучшенных датасетов
+# ======== СОЗДАНИЕ DATASET ========
 print("\n===== DATASET CREATION =====")
-train_ds = VoiceDataset(
-    train_files, train_labels, 
-    n_mfcc=N_MFCC, max_len=MAX_LEN,
-    cache_dir="train_cache", 
-    augment=True  # Включаем аугментацию для тренировочной выборки
-)
-
-val_ds = VoiceDataset(
-    val_files, val_labels,
-    n_mfcc=N_MFCC, max_len=MAX_LEN,
-    cache_dir="val_cache",
-    augment=False  # Без аугментации для валидации
-)
-
-test_ds = VoiceDataset(
-    test_files, test_labels,
-    n_mfcc=N_MFCC, max_len=MAX_LEN,
-    cache_dir="test_cache",
-    augment=False  # Без аугментации для тестирования
-)
+train_ds = VoiceDataset(train_files, train_labels, n_mfcc=N_MFCC, max_len=MAX_LEN, cache_dir="train_cache", augment=True)
+val_ds = VoiceDataset(val_files, val_labels, n_mfcc=N_MFCC, max_len=MAX_LEN, cache_dir="val_cache", augment=False)
+test_ds = VoiceDataset(test_files, test_labels, n_mfcc=N_MFCC, max_len=MAX_LEN, cache_dir="test_cache", augment=False)
 
 print(f"Training dataset size: {len(train_ds)}")
 print(f"Validation dataset size: {len(val_ds)}")
 print(f"Test dataset size: {len(test_ds)}")
 
-# Проверка размерности данных
 sample_input, sample_label = train_ds[0]
 print(f"Input shape: {sample_input.shape}")
 print(f"Feature dimension: {sample_input.shape[0]}")
@@ -169,95 +148,22 @@ if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
-model = train_model(
-    train_ds,
-    val_ds,
-    num_classes=len(valid_users),
-    epochs=EPOCHS,
-    batch_size=BATCH_SIZE,
-    device=device,
-    save_path="improved_models"
-)
+model = train_model(train_ds, val_ds, num_classes=len(valid_users), epochs=EPOCHS, batch_size=BATCH_SIZE, device=device, save_path="improved_models")
 
-# ======== ДЕТАЛЬНАЯ ОЦЕНКА ========
+# ======== ОЦЕНКА ========
 print("\n===== DETAILED EVALUATION =====")
-test_loader = torch.utils.data.DataLoader(
-    test_ds,
-    batch_size=BATCH_SIZE,
-    shuffle=False,
-    num_workers=4 if device == "cuda" else 2,
-    pin_memory=True
-)
+test_loader = torch.utils.data.DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4 if device == "cuda" else 2, pin_memory=True)
 
 results = evaluate_model(model, test_loader, device=device, threshold_step=0.001)
 
 if results is not None:
     print("\n===== RESULTS SUMMARY =====")
-    print(f"🎯 EER (Equal Error Rate): {results['eer']:.4f} ({results['eer']*100:.2f}%)")
-    print(f"📊 AUC (Area Under Curve): {results['auc']:.4f}")
+    print(f"🎯 EER (Equal error rate): {results['eer']:.4f} ({results['eer']*100:.2f}%)")
+    print(f"📊 AUC: {results['auc']:.4f}")
     print(f"🎲 Accuracy: {results['accuracy']:.4f} ({results['accuracy']*100:.2f}%)")
-    print(f"❌ FAR (False Accept Rate): {results['far']:.4f} ({results['far']*100:.2f}%)")
-    print(f"🚫 FRR (False Reject Rate): {results['frr']:.4f} ({results['frr']*100:.2f}%)")
-    print(f"🔍 Min DCF: {results['min_dcf']:.4f}")
-    print(f"📏 d-prime (separability): {results['d_prime']:.4f}")
-    print(f"📐 Metric used: {results['metric_used']}")
-    print(f"🔗 Separability: {results['separability']:.4f}")
-    
-    print(f"\n📈 Genuine scores - Mean: {results['genuine_stats']['mean']:.4f}, "
-          f"Std: {results['genuine_stats']['std']:.4f}")
-    print(f"📉 Impostor scores - Mean: {results['impostor_stats']['mean']:.4f}, "
-          f"Std: {results['impostor_stats']['std']:.4f}")
-    
-    # Создание графиков
-    try:
-        plot_evaluation_results(results, "improved_evaluation_plots.png")
-        print("📊 Evaluation plots saved to improved_evaluation_plots.png")
-    except Exception as e:
-        print(f"⚠️ Could not create plots: {e}")
-
-    # ======== СОХРАНЕНИЕ УЛУЧШЕННОЙ МОДЕЛИ ========
-    print("\n===== SAVING IMPROVED MODEL =====")
-    model_path = "voice_auth_improved_model.pth"
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'label2id': label2id,
-        'id2label': id2label,
-        'config': {
-            'n_mfcc': N_MFCC,
-            'max_len': MAX_LEN,
-            'output_dim': 512,
-            'num_users': len(valid_users)
-        },
-        'results': results,
-        'training_params': {
-            'epochs': EPOCHS,
-            'batch_size': BATCH_SIZE,
-            'min_files_per_user': MIN_FILES_PER_USER
-        }
-    }, model_path)
-
-    print(f"✅ Improved model saved to {model_path}")
-    
-    # Интерпретация результатов
-    print("\n===== PERFORMANCE INTERPRETATION =====")
-    if results['eer'] < 0.05:
-        print("🟢 EXCELLENT: EER < 5% - Production ready system")
-    elif results['eer'] < 0.10:
-        print("🟡 GOOD: EER < 10% - Acceptable for most applications")
-    elif results['eer'] < 0.20:
-        print("🟠 FAIR: EER < 20% - Needs improvement for security applications")
-    else:
-        print("🔴 POOR: EER > 20% - Significant improvements needed")
-    
-    if results['auc'] > 0.95:
-        print("🟢 EXCELLENT: AUC > 95% - Very good discriminability")
-    elif results['auc'] > 0.90:
-        print("🟡 GOOD: AUC > 90% - Good discriminability")
-    elif results['auc'] > 0.80:
-        print("🟠 FAIR: AUC > 80% - Moderate discriminability")
-    else:
-        print("🔴 POOR: AUC < 80% - Poor discriminability")
-
+    print(f"❌ FAR: {results['far']:.4f} ({results['far']*100:.2f}%)")
+    print(f"🚫 FRR: {results['frr']:.4f} ({results['frr']*100:.2f}%)")
+    print(f"📏 d-prime: {results['d_prime']:.4f}")
 else:
     print("❌ Evaluation failed!")
 
